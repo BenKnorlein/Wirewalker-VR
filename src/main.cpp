@@ -23,7 +23,6 @@ using namespace MinVR;
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
-#include <opencv2/imgproc.hpp>
 
 // Just included for some simple Matrix math used below
 // This is not required for use of MinVR in general
@@ -32,8 +31,56 @@ using namespace MinVR;
 struct pt {
 	float vertex[3];
 	float color[3];
+	float value;
 };
-std::vector <pt> points;
+
+std::vector< std::vector <pt> >points;
+
+void colormap_jet(
+		double value,
+		double min_val,
+		double max_val,
+		unsigned char &r,
+		unsigned char &g,
+		unsigned char &b
+	){
+
+	// scale the gray value into the range [0, 8]
+	const double gray = 8 *  ((value - min_val) / (max_val - min_val));
+	// s is the slope of color change
+	const double s = 1.0 / 2.0;
+
+	if (gray <= 1)
+	{
+		r = 0;
+		g = 0;
+		b = static_cast<unsigned char>((gray + 1)*s * 255 + 0.5);
+	}
+	else if (gray <= 3)
+	{
+		r = 0;
+		g = static_cast<unsigned char>((gray - 1)*s * 255 + 0.5);
+		b = 255;
+	}
+	else if (gray <= 5)
+	{
+		r = static_cast<unsigned char>((gray - 3)*s * 255 + 0.5);
+		g = 255;
+		b = static_cast<unsigned char>((5 - gray)*s * 255 + 0.5);
+	}
+	else if (gray <= 7)
+	{
+		r = 255;
+		g = static_cast<unsigned char>((7 - gray)*s * 255 + 0.5);
+		b = 0;
+	}
+	else
+	{
+		r = static_cast<unsigned char>((9 - gray)*s * 255 + 0.5);
+		g = 0;
+		b = 0;
+	}
+}
 
 /** MyVRApp is a subclass of VRApp and overrides two key methods: 1. onVREvent(..)
     and 2. onVRRenderGraphics(..).  This is all that is needed to create a
@@ -42,7 +89,7 @@ std::vector <pt> points;
  */
 class MyVRApp : public VRApp {
 public:
-	MyVRApp(int argc, char** argv, const std::string& configFile) : VRApp(argc, argv, configFile), isInitialised(false){
+	MyVRApp(int argc, char** argv, const std::string& configFile) : VRApp(argc, argv, configFile), isInitialised(false),movement_y(0.0), movement_x(0.0), currentList(0){
 		filename = argv[2];
 		computeCenter();
     }
@@ -63,10 +110,24 @@ public:
 	// Callback for event handling, inherited from VRApp
 	virtual void onVREvent(const VREvent &event) {
 
+		if (startsWith(event.getName(), "Wand0_Move")){
+			controllerpose = event.getDataAsFloatArray("Transform");
+		}
+		if(event.getName() == "Wand_Left_Btn_Down") {
+			currentList++;
+			if(currentList >= list.size())currentList = 0;
+		}
+		if(event.getName() == "Wand_Joystick_Y_Change") {
+			movement_y = event.getDataAsFloat("AnalogValue");
+		}
+		if(event.getName() == "Wand_Joystick_X_Change") {
+			movement_x = event.getDataAsFloat("AnalogValue");
+		}
+
 		if (startsWith(event.getName(), "HTC_Controller_1"))
 		{
 			if(event.getInternal()->getDataIndex()->exists("/HTC_Controller_1/Pose")){
-				controllerpose = event.getDataAsDoubleArray("Pose");
+				controllerpose = event.getDataAsFloatArray("Pose");
 				controllerpose = controllerpose.transpose();
 			}
 			if (event.getInternal()->getDataIndex()->exists("/HTC_Controller_1/State/Axis0Button_Pressed")&&
@@ -80,44 +141,6 @@ public:
 				{
 					VRVector3 offset = 0.1 * controllerpose * VRVector3(0, 0, y);
 					VRMatrix4 trans = VRMatrix4::translation(offset);
-					for (int i = 0; i < 16; i++)
-					{
-						std::cerr << roompose.m[i] << " ";
-					}
-					std::cerr << std::endl;
-					roompose = trans * roompose;
-				}
-				//else
-				{
-					VRMatrix4 rot = VRMatrix4::rotationY(x / 10 / CV_PI);
-					roompose = rot * roompose;
-				}
-
-			}
-		}
-
-		if (startsWith(event.getName(), "HTC_Controller_2"))
-		{
-			if(event.getInternal()->getDataIndex()->exists("/HTC_Controller_2/Pose")){
-				controllerpose = event.getDataAsDoubleArray("Pose");
-				controllerpose = controllerpose.transpose();
-			}
-			if (event.getInternal()->getDataIndex()->exists("/HTC_Controller_2/State/Axis0Button_Pressed")&&
-				(int) event.getInternal()->getDataIndex()->getValue("/HTC_Controller_2/State/Axis0Button_Pressed")){
-				double x = event.getInternal()->getDataIndex()->getValue("/HTC_Controller_2/State/Axis0/XPos");
-				double y = event.getInternal()->getDataIndex()->getValue("/HTC_Controller_2/State/Axis0/YPos");
-				bool rotate = false;
-				if (fabs(x) > fabs(y)) rotate = true;
-				
-				//if (!rotate)
-				{
-					VRVector3 offset = 0.1 * controllerpose * VRVector3(0, 0, y);
-					VRMatrix4 trans = VRMatrix4::translation(offset);
-					for (int i = 0; i < 16; i++)
-					{
-						std::cerr << roompose.m[i] << " ";
-					}
-					std::cerr << std::endl;
 					roompose = trans * roompose;
 				}
 				//else
@@ -139,6 +162,15 @@ public:
 	// Callback for rendering, inherited from VRRenderHandler
 	virtual void onVRRenderGraphicsContext(const VRGraphicsState& state) {
 		createDisplayList();
+
+		if(fabs(movement_x) > 0.1 || fabs(movement_y) > 0.1){
+			VRVector3 offset = 0.5 * controllerpose * VRVector3(0, 0, movement_y);
+			VRMatrix4 trans = VRMatrix4::translation(offset);
+			roompose = trans * roompose;
+
+			VRMatrix4 rot = VRMatrix4::rotationY(movement_x / 10 / CV_PI);
+			roompose = rot * roompose;	
+		}
 	}
 
 	// Callback for rendering, inherited from VRRenderHandler
@@ -146,7 +178,7 @@ public:
 		glEnable(GL_DEPTH_TEST);
 		glDepthFunc(GL_LEQUAL);
 		glClearDepth(1.0f);
-		glClearColor(0.0, 0.0, 0.0, 1.f);
+		glClearColor(0.2, 0.2, 0.3, 1.f);
 		glDisable(GL_LIGHTING);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -156,13 +188,13 @@ public:
 		glMatrixMode(GL_MODELVIEW);
 		glLoadMatrixf(state.getViewMatrix());
 
-    	glPushMatrix();
-			glMultMatrixd(&roompose.m[0]);
-			glCallList(list);
+    		glPushMatrix();
+			glMultMatrixf(roompose.getArray());
+			glCallList(list[currentList]);
 		glPopMatrix();
 
 		glPushMatrix();
-			glMultMatrixd(&controllerpose.m[0]);
+			glMultMatrixf(controllerpose.getArray());
 			glBegin(GL_LINES);                // Begin drawing the color cube with 6 quads
 			// Back face (z = -1.0f)
 			glColor3f(0.5f, 0.5f, 0.0f);     // Yellow
@@ -180,28 +212,39 @@ public:
 		double y = 0;
 		double z = 0;
 
-		for (int i = 0; i < points.size(); i++)
+		for (int i = 0; i < points[0].size(); i++)
 		{
-			x += points[i].vertex[0];
-			y += points[i].vertex[1];
-			z += points[i].vertex[2];
+			x += points[0][i].vertex[0];
+			y += points[0][i].vertex[1];
+			z += points[0][i].vertex[2];
 		}
 
-		x = x / points.size();
-		y = y / points.size();
-		z = z / points.size();
+		x = x / points[0].size();
+		y = y / points[0].size();
+		z = z / points[0].size();
+
+		std::cerr << x << " " << y <<  " " << z << std::endl;
 
 		roompose = VRMatrix4::translation(VRVector3(-x, -y, -z));
 	}
 
-	void drawPoints()
+	void drawPoints(unsigned int id)
 	{
-		glBegin(GL_LINE_STRIP);
-		for (int i = 0; i < points.size(); i+= 2)
+		float min = 100000000;
+		float max = -100000000;
+		for (int i = 0; i < points[id].size(); i++)
 		{
-			//std::cerr << points[i].vertex[0] << " , " << points[i].vertex[1] << " , " << points[i].vertex[2] << std::endl;
-			glColor3f(points[i].color[0], points[i].color[1], points[i].color[2]);		
-			glVertex3f(points[i].vertex[0], points[i].vertex[1], points[i].vertex[2]);
+			if(min > points[id][i].value) min = points[id][i].value;			
+			if(max < points[id][i].value) max = points[id][i].value;			
+		}
+
+		glBegin(GL_LINE_STRIP);
+		for (int i = 0; i < points[id].size(); i+= 2)
+		{
+			unsigned char r,g,b;
+			colormap_jet(points[id][i].value, min, max,r,g,b);
+			glColor3ub(r,g,b);		
+			glVertex3f(points[id][i].vertex[0], points[id][i].vertex[1], points[id][i].vertex[2]);
 			
 		}
 		glEnd();
@@ -210,13 +253,16 @@ public:
 	void createDisplayList()
 	{
 		if (!isInitialised)
-		{
-			glLineWidth(10.0);
-			list = glGenLists(1);
-			glNewList(list, GL_COMPILE);
-			drawPoints();
-			glEndList();
-			isInitialised = true;
+		{	
+			for(unsigned int i = 0; i < points.size(); i++){
+				glLineWidth(30.0);
+				unsigned int l = glGenLists(1);
+				glNewList(l, GL_COMPILE);
+				drawPoints(i);
+				glEndList();
+				isInitialised = true;
+				list.push_back(l);
+			}
 		}
 	}
 
@@ -226,23 +272,30 @@ protected:
 	
 	std::string filename;
 	bool isInitialised;
-	unsigned int list;
+	std::vector <unsigned int> list;
 	VRMatrix4 controllerpose;
 	VRMatrix4 roompose;
+	unsigned int currentList;
+	float movement_y, movement_x;
 };
-void addPoint(float x, float y, float z, float r, float g, float b)
+void addPoint(int id, float x, float y, float z, float value)
 {
-	float scale = 1;
+	if(id >= points.size()){
+		std::vector <pt> pts;
+		points.push_back(pts);
+	}
+
+	float scale = 300;
+	float y_scale = 0.1;
+
 	pt p;
-	p.vertex[0] = 3 * x / scale;
-	p.vertex[1] = -y / scale / 100;
-	p.vertex[2] = 3 * z / scale;
+	p.vertex[0] = scale * x ;
+	p.vertex[1] = y_scale * -y;
+	p.vertex[2] = scale* z ;
 
-	p.color[0] = r;
-	p.color[1] = g;
-	p.color[2] = b;
+	p.value = value;
 
-	points.push_back(p);
+	points[id].push_back(p);
 }
 
 std::istream& safeGetline(std::istream& is, std::string& t)
@@ -282,6 +335,8 @@ std::istream& safeGetline(std::istream& is, std::string& t)
 	}
 }
 
+
+
 std::istream& comma(std::istream& in)
 {
 	if ((in >> std::ws).peek() != std::char_traits<char>::to_int_type(','))
@@ -292,7 +347,7 @@ std::istream& comma(std::istream& in)
 }
 void loadDataSet(std::string file)
 {
-	std::ifstream fin(file);
+	std::ifstream fin(file.c_str());
 	std::istringstream in;
 	std::string line;
 	int count = 0;
@@ -306,9 +361,10 @@ void loadDataSet(std::string file)
 			tmp.push_back(value);
 		}
 
-		if (tmp.size() == 6)
+		if (tmp.size() >= 4)
 		{
-			addPoint(tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5]);
+			for(int i = 3; i < tmp.size(); i++)
+				addPoint(i - 3, tmp[0], tmp[1], tmp[2], tmp[i]);
 		}
 		line.clear();
 		tmp.clear();
@@ -319,7 +375,7 @@ void loadDataSet(std::string file)
 
 int main(int argc, char **argv) {
 	loadDataSet(argv[2]);
-    MyVRApp app(argc, argv, argv[1]);
+    	MyVRApp app(argc, argv, argv[1]);
   	app.run();
 	exit(0);
 }
